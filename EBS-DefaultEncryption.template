@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Default EBS encryption via CloudFormation, not using Regions intentionally
+
+Resources:
+  CustomResourceLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt CustomResourceExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import cfnresponse
+
+          region = os.environ['AWS_REGION']
+
+
+          def lambda_handler(event, context):
+              responseData = {}
+
+              # Create...
+              if event['RequestType'] == 'Create':
+                  ec2 = boto3.client('ec2', region_name=region)
+                  print ("Checking region: " + region)
+                  status = ec2.get_ebs_encryption_by_default()
+                  result = status["EbsEncryptionByDefault"]
+                  if result is True:
+                      print ("Enabled, nothing to do")
+                      responseData['Data'] = "Encryption was already on, skipping..."
+                  else:
+                      print("Not enabled, activation in progress")
+                      resp = ec2.enable_ebs_encryption_by_default()
+                      print(resp)
+                      responseData['Data'] = resp['EbsEncryptionByDefault']
+          
+              # Deletion event
+              if event['RequestType'] == 'Delete':
+                  responseData['Data'] = "Deleting"
+                  print("Delete - not going to turn it off though")
+
+              cfnresponse.send(event, context, "SUCCESS", responseData)
+              return responseData
+
+      Runtime: "python3.7"
+      Timeout: 120
+  CustomResourceExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: BasicPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:DisableEbsEncryptionByDefault"
+                  - "ec2:EnableEbsEncryptionByDefault"
+                  - "ec2:GetEbsEncryptionByDefault"
+                Resource:
+                  - "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  EBSEncryption:
+    Type: Custom::EBSEncryptionEnabler
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambda.Arn

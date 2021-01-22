@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: S3 set Block Public Access via CloudFormation, it's global so no need for regions
+
+Resources:
+  CustomResourceLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt CustomResourceExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+
+          def lambda_handler(event, context):
+              responseData = {}
+              account_id = context.invoked_function_arn.split(":")[4]
+              print("Account: " + account_id)
+
+              # Create...
+              if event['RequestType'] == 'Create':
+                  s3c = boto3.client('s3control')
+                  # TODO in future - status = s3c.get_public_access_block()
+
+                  try:
+                      resp = s3c.put_public_access_block(
+                        PublicAccessBlockConfiguration={
+                            'BlockPublicAcls': True,
+                            'IgnorePublicAcls': True,
+                            'BlockPublicPolicy': True,
+                            'RestrictPublicBuckets': True
+                        },
+                        AccountId=account_id
+                      )
+                      responseData['Data'] = "Done"
+                      print("Done")
+                      cfnresponse.send(event, context, "SUCCESS", responseData)
+                  except Exception as e:
+                      print("ERROR: {}".format(str(e)))
+                      responseData['Data'] = str(e)
+                      cfnresponse.send(event, context, "FAILED", responseData)
+          
+              # Deletion event
+              if event['RequestType'] == 'Delete':
+                  responseData['Data'] = "Deleting"
+                  print("Delete - not going to turn it off though")
+                  cfnresponse.send(event, context, "SUCCESS", responseData)
+
+              return responseData
+
+      Runtime: "python3.7"
+      Timeout: 120
+
+  CustomResourceExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: BasicPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:GetAccountPublicAccessBlock"
+                  - "s3:PutAccountPublicAccessBlock"
+                  - "s3:GetPublicAccessBlock"
+                  - "s3:PutPublicAccessBlock"
+                Resource:
+                  - "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  S3BlockPublicAccess:
+    Type: Custom::S3PublicAccessBlocker
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambda.Arn

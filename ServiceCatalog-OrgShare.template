@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Service Catalog Share with AWS Organizations entities, can be deployed as a StackSet or standalone Stack
+Parameters:
+  OrganizationNodeType:
+    AllowedValues: ["ORGANIZATION", "ORGANIZATIONAL_UNIT", "ACCOUNT"]
+    Default: "ORGANIZATIONAL_UNIT"
+    Description: Type of entity to share with
+    Type: String
+  NodeToShareWith:
+    Type: String
+    AllowedPattern: '^(o-.*|ou-.*|[0-9]{12})$'
+    Description: The Org/OU/Account to share with
+    # Default: ou-1234ab
+  PortfolioId:
+    Type: String
+    Description: Portfolio ID to share
+    AllowedPattern: '^port-.+$'
+    # Default: port-ab
+
+Resources:
+  SharerLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt SharerExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+
+          def lambda_handler(event, context):
+              responseData = {}
+              sc = boto3.client('servicecatalog')
+              portfolio = event["ResourceProperties"].get("PortfolioId")
+              org_info = event["ResourceProperties"].get("OrganizationNode")
+
+              # Create...
+              if event['RequestType'] == 'Create':
+                  try:
+                      resp = sc.create_portfolio_share(
+                          PortfolioId=portfolio,
+                          OrganizationNode=org_info
+                      )
+                      print("Org Share Created: Portfolio='{}', OrgUnit='{}'".format(
+                          portfolio, org_info['Value']))
+                      responseData['Data'] = resp['PortfolioShareToken']
+                      cfnresponse.send(event, context, "SUCCESS", responseData)
+                  except Exception as e:
+                      print("ERROR: {}".format(str(e)))
+                      responseData['Data'] = str(e)
+                      cfnresponse.send(event, context, "FAILED", responseData)
+
+              # Deletion event
+              if event['RequestType'] == 'Delete':
+                  try:
+                      resp = sc.delete_portfolio_share(
+                          PortfolioId=portfolio,
+                          OrganizationNode=org_info
+                      )
+                      print("Org Share Deleted")
+                      responseData['Data'] = resp['PortfolioShareToken']
+                      cfnresponse.send(event, context, "SUCCESS", responseData)
+                  except Exception as e:
+                      print("ERROR: {}".format(str(e)))
+                      responseData['Data'] = str(e)
+                      cfnresponse.send(event, context, "FAILED", responseData)
+
+              # Update event
+              # TODO not implemented, it gets messy
+              if event['RequestType'] == 'Update':
+                  print("No updates today...")
+                  print("Event: {}".format(event))
+                  cfnresponse.send(event, context, "SUCCESS", {"Message": "UPDATE"})
+
+              return '{}'
+
+      Runtime: "python3.7"
+      Timeout: 120
+  
+  SharerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: RequiredPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "servicecatalog:CreatePortfolioShare"
+                  - "servicecatalog:DeletePortfolioShare"
+                Resource:
+                  - !Sub "arn:aws:catalog:${AWS::Region}:${AWS::AccountId}:portfolio/${PortfolioId}"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSOrganizationsReadOnlyAccess
+
+  PortfolioShare:
+    Type: Custom::PortfolioShare
+    Properties:
+      ServiceToken: !GetAtt SharerLambda.Arn
+      OrganizationNode:
+        Type: !Ref OrganizationNodeType
+        Value: !Ref NodeToShareWith
+      PortfolioId: !Ref PortfolioId

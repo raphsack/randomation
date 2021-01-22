@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RDS Public Instance with Remediation'
+Parameters:
+  ConfigRemediationRoleName:
+    Type: String
+    Default: "ConfigRemediationRole"
+    Description: Role name for Config Rule Remediation
+Resources:
+  ConfigRule:
+    Type: 'AWS::Config::ConfigRule'
+    Properties:
+      ConfigRuleName: rds-instance-public-access-check
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::RDS::DBInstance'
+      Description: >-
+        A config rule that checks whether the Amazon Relational Database Service
+        instances are not publicaly accessible. The rule is NON_COMPLIANT if the
+        publiclyAccessible field is true in the instance configuration item.
+      Source:
+        Owner: AWS
+        SourceIdentifier: RDS_INSTANCE_PUBLIC_ACCESS_CHECK
+
+  # Auto-remediation Configuration
+  RDSNonPublicInstanceRemediation:
+    Type: AWS::Config::RemediationConfiguration
+    DependsOn: [ConfigRule]
+    Properties:
+      Automatic: true
+      ConfigRuleName: rds-instance-public-access-check
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 100
+          ErrorPercentage: 1
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+      Parameters:
+        DBInstanceId:
+          ResourceValue:
+            Value: RESOURCE_ID
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+            - !GetAtt AutomationAssumeRole.Arn
+      ResourceType: AWS::RDS::DBInstance
+      TargetId: !Ref RemediationDocument
+      TargetType: SSM_DOCUMENT
+  
+  # Remediation Doc
+  RemediationDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: RemediateRDSPublicInstances
+      Content:
+        schemaVersion: '0.3'
+        description: Automation document that disables public access to RDS instances
+        assumeRole: "{{AutomationAssumeRole}}"
+        parameters:
+          DBInstanceId:
+            type: String
+          AutomationAssumeRole:
+            type: String
+            description: "(Required) The ARN of the role that allows Automation to
+              perform the actions on your behalf."
+            default: !GetAtt AutomationAssumeRole.Arn
+        mainSteps:
+        - name: getInstanceId
+          action: aws:executeAwsApi
+          inputs:
+            Service: rds
+            Api: DescribeDBInstances
+            Filters:
+            - Name: dbi-resource-id
+              Values:
+              - "{{DBInstanceId}}"
+          outputs:
+          - Name: instanceId
+            Selector: DBInstances[0].DBInstanceIdentifier
+            Type: String
+        - name: verifyAvailableState
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 360
+          inputs:
+            Service: rds
+            Api: DescribeDBInstances
+            Filters:
+            - Name: dbi-resource-id
+              Values:
+              - "{{DBInstanceId}}"
+            PropertySelector: "$.DBInstances[0].DBInstanceStatus"
+            DesiredValues:
+              - available
+        - name: removePublicAccess
+          action: aws:executeAwsApi
+          inputs:
+            Service: rds
+            Api: ModifyDBInstance
+            PubliclyAccessible: false
+            DBInstanceIdentifier: "{{getInstanceId.instanceId}}"
+      DocumentType: Automation
+
+  # SSM Automation Role - TODO consider using a central one instead of duplicating
+  AutomationAssumeRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Ref ConfigRemediationRoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ssm.amazonaws.com
+          Action: sts:AssumeRole
+      Description: Remediation Role
+      Policies:
+      - PolicyName: RemediatePublicRDS
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - rds:ModifyDBInstance
+            - rds:DescribeDBInstances
+            Resource: "*"
+

@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Control Tower Enrollment Pre-Reqs Automation
+Parameters:
+  Regions:
+    Type: String
+    Description: "String of regions to clean AWS Config setup from"
+    Default: "ap-southeast-1,eu-west-3" # TODO TWEAK!
+    MinLength: 5 # Just to make sure someone gives inputs!
+  ManagementAccount:
+    Description:  Management account ID
+    Type: String
+    AllowedPattern: "^[0-9]{12}$"
+    ConstraintDescription: Account ID required
+
+Resources:
+  CustomResourceLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt CustomResourceExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+          import logging
+          import cfnresponse
+          regions = "${Regions}"
+
+          LOGGER = logging.getLogger()
+          LOGGER.setLevel(logging.INFO)  # TODO WARNING
+
+
+          def lambda_handler(event, context):
+              responseData = {}
+              # TODO try catch
+
+              # Create...
+              if event['RequestType'] == 'Create':
+                  data = ""
+                  for region in regions.split(','):
+                      data += region + ": "
+                      LOGGER.info("Checking region: {}".format(region))
+                      config = boto3.client('config', region_name=region)
+                      resp = config.describe_configuration_recorders()
+                      if resp["ConfigurationRecorders"]:
+                          recs = [rec['name'] for rec in resp["ConfigurationRecorders"]]
+                          LOGGER.info("Found: {} recorders".format(recs))
+                          # Note, we could just assume it's always default but...
+                          for rec in recs:
+                              LOGGER.info("DELETE {}".format(rec))
+                              data += "[rec] {}".format(rec)
+                              try:
+                                  resp = config.delete_configuration_recorder(
+                                      ConfigurationRecorderName=rec
+                                  )
+                              except Exception as e:
+                                  print("ERROR: {}".format(str(e)))
+                                  responseData['Data'] = str(e)
+                                  cfnresponse.send(
+                                      event, context, "FAILED", responseData)
+                      else:
+                          LOGGER.info("No recorders found")
+                          data += "[no recs]"
+      
+                      resp = config.describe_delivery_channels()
+                      if resp["DeliveryChannels"]:
+                          dcs = [dc['name'] for dc in resp["DeliveryChannels"]]
+                          LOGGER.info("Found: {} delivery channels".format(dcs))
+                          for dc in dcs:
+                              LOGGER.info("DELETE {}".format(dc))
+                              data += "[dc] {}".format(dc)
+                              try:
+                                  resp = config.delete_delivery_channel(
+                                      DeliveryChannelName=dc
+                                  )
+                              except Exception as e:
+                                  print("ERROR: {}".format(str(e)))
+                                  responseData['Data'] = str(e)
+                                  cfnresponse.send(
+                                      event, context, "FAILED", responseData)
+                      else:
+                          LOGGER.info("No delivery channels found")
+                          data += "[no dc]"
+                      data += "; "
+                  responseData['Data'] = data  # "Nothing to see here..."
+          
+              # Deletion or Update event
+              if event['RequestType'] == 'Delete' or event['RequestType'] == 'Update':
+                  responseData['Data'] = event['RequestType']
+                  LOGGER.info("{} - nothing for me to do".format(event['RequestType']))
+                  print("{} - nothing for me to do".format(event['RequestType']))
+
+              cfnresponse.send(event, context, "SUCCESS", responseData)
+              return responseData
+
+      Runtime: "python3.7"
+      Timeout: 600
+
+  CustomResourceExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: RequiredPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "config:DeleteConfigurationRecorder"
+                  - "config:DeleteDeliveryChannel"
+                  - "config:DescribeConfigurationRecorders"
+                  - "config:DescribeDeliveryChannels"
+                Resource:
+                  - "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  ConfigCleaner:
+    Type: Custom::ConfigCleaner
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambda.Arn
+
+  ControlTowerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWSControlTowerExecution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${ManagementAccount}:root"
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
