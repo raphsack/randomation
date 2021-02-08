@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Simple NetworkFirewall setup with sorted Endpoints
+Parameters:
+  VPC:
+    Type: "AWS::EC2::VPC::Id"
+    Description: VPC for the setup
+  Subnet1:
+    Type: "AWS::EC2::Subnet::Id"
+    Description: "First subnet for the setup (should map to AZa)"
+  Subnet2:
+    Type: "AWS::EC2::Subnet::Id"
+    Description: "Second subnet for the setup (should map to AZb)"
+
+Resources:
+  # Native bits
+  NetworkFirewall:
+    Type: 'AWS::NetworkFirewall::Firewall'
+    Properties:
+      FirewallName: network-firewall
+      VpcId: !Ref VPC
+      SubnetMappings:
+        - SubnetId: !Ref Subnet1
+        - SubnetId: !Ref Subnet2
+      FirewallPolicyArn:
+        Ref: FirewallPolicy
+      DeleteProtection: false
+      FirewallPolicyChangeProtection: false
+      SubnetChangeProtection: false
+      Tags:
+        - Key: Name
+          Value: NetworkFirewall1
+  FirewallPolicy:
+    Type: 'AWS::NetworkFirewall::FirewallPolicy'
+    Properties:
+      FirewallPolicyName: firewallpolicy
+      FirewallPolicy:
+        StatelessDefaultActions:
+          - 'aws:forward_to_sfe'
+        StatelessFragmentDefaultActions:
+          - 'aws:forward_to_sfe'
+  
+  # Custom bobs
+  CustomResourceLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt CustomResourceExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+
+          def lambda_handler(event, context):
+              responseData = {}
+
+              # Deletion event
+              if event['RequestType'] == 'Delete':
+                  responseData['EndpointIds'] = "Deleting"
+                  print("Delete - nothing here for me...")
+
+              # Create or Update...
+              else:
+                  # EndpointIds
+                  eps = event["ResourceProperties"].get("EndpointIds")
+                  eps.sort()
+                  # DEBUG print("PRE: {}".format(eps))
+                  # If you want to clean 'em up use
+                  eps = [ep.partition(":")[2] for ep in eps]
+
+                  print("Endpoints: {}".format(eps))
+                  responseData['EndpointIds'] = eps
+
+              cfnresponse.send(event, context, "SUCCESS", responseData)
+              return responseData
+
+      Runtime: "python3.7"
+      Timeout: 120
+  CustomResourceExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  Sorter:
+    Type: Custom::EndpointSorter
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambda.Arn
+      EndpointIds: !GetAtt NetworkFirewall.EndpointIds
+
+  # TODO make your routes work and logic here!
+  # FWRoute:
+  #   Type: AWS::EC2::Route
+  #   DependsOn: NetworkFirewall
+  #   Properties:
+  #     RouteTableId: !Ref RouteTable
+  #     DestinationCidrBlock: '0.0.0.0/0'
+  #     VpcEndpointId: !Select [ 0, !GetAtt Sorter.EndpointIds ]  # Or something of the sort
+
+
+Outputs:
+  AZa:
+    Description: AZ a Endpoint
+    Value: !Select [ 0, !GetAtt Sorter.EndpointIds ] 
+  AZb:
+    Description: AZ b Endpoint
+    Value: !Select [ 1, !GetAtt Sorter.EndpointIds ] 
